@@ -1,0 +1,32 @@
+# ==============================================================================
+# Video-Based Identity Document Verification — Dependencies
+# ==============================================================================
+
+# Core
+numpy>=1.24,<2.0
+pandas>=2.0
+opencv-python-headless>=4.8
+PyYAML>=6.0
+
+# Deep Learning
+torch>=2.0
+torchvision>=0.15
+
+# Object Detection
+ultralytics>=8.0
+
+# OCR
+paddlepaddle>=2.5              # PaddleOCR backend (CPU version; use paddlepaddle-gpu for CUDA)
+paddleocr>=2.7
+
+# ML Utilities
+scikit-learn>=1.3
+scipy>=1.11
+
+# Demo
+streamlit>=1.28
+
+# Dev / Testing
+pytest>=7.0
+matplotlib>=3.7
+jupyterlab>=4.0

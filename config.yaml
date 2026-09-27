@@ -1,0 +1,135 @@
+# ==============================================================================
+# DEPRECATED CONFIGURATION FILE — Video-Based Identity Document Verification
+# ==============================================================================
+# WARNING / DEPRECATION NOTICE:
+# This file (config.yaml) is DEPRECATED and retained solely for backward
+# compatibility.
+#
+# The canonical single source of truth for all project configurations is now:
+#   config/settings.yaml
+#
+# Please use config/settings.yaml in all scripts, pipelines, and modules.
+# ==============================================================================
+
+# --- Paths ---
+paths:
+  data_dir: "data"
+  raw_dir: "data/raw"
+  sample_dir: "data/sample"
+  synthetic_dir: "data/synthetic"
+  models_dir: "models/weights"
+  output_dir: "outputs"
+
+# --- Frame Extraction ---
+frame_extraction:
+  max_frames: 10                    # Maximum frames to sample from video
+  min_sharpness: 50.0               # Laplacian variance threshold for blur rejection
+  sampling_strategy: "uniform"      # "uniform" | "sharpness" | "motion"
+
+# --- Document Detection ---
+# Baseline OpenCV contour detector with pluggable YOLO detector support
+document_detection:
+  method: "opencv_contour"          # "opencv_contour" (default baseline) | "yolo"
+  confidence_threshold: 0.35        # Minimum detection confidence
+  min_area_ratio: 0.05              # Minimum contour area relative to frame
+  max_area_ratio: 0.95              # Maximum contour area (reject full frame)
+  min_aspect_ratio: 1.0             # Minimum width/height or height/width aspect ratio
+  max_aspect_ratio: 2.8             # Maximum aspect ratio
+  refine_subpixel: true             # Sub-pixel corner refinement
+  # YOLO configuration (available when method: "yolo")
+  model_name: "yolov8n.pt"          # Pretrained or fine-tuned YOLO model weights
+  iou_threshold: 0.45               # NMS IoU threshold
+  target_classes: null              # null accepts highest-confidence candidate; or list of class names/ids
+  crop_padding: 0.02                # Margin padding around bounding box (fraction of dimension)
+  save_debug_frames: true           # Save visual bounding box annotations for verification
+
+# --- Perspective Correction ---
+perspective_correction:
+  target_width: 600                 # Normalized output width (pixels)
+  target_height: 400                # Normalized output height (pixels)
+  corner_refinement: true           # Sub-pixel corner refinement
+  fallback_to_crop: true            # If 4 corners cannot be found, resize bounding box with explicit flag
+  min_contour_area_ratio: 0.15      # Minimum contour area relative to crop area to qualify as document
+  save_comparison_debug: true       # Save side-by-side original vs corrected debug frames
+
+# --- Visual Feature Extraction ---
+visual_features:
+  backbone: "efficientnet_b0"       # "efficientnet_b0" | "vit_small" | "resnet50"
+  embedding_dim: 1280               # EfficientNet-B0 = 1280
+  device: "auto"                    # "auto" | "cpu" | "cuda"
+  freeze_backbone: true             # Always true — backbone is never fine-tuned
+
+# --- Visual Integrity ---
+visual_integrity:
+  classification: "binary"          # "binary" (REAL vs ATTACKED)
+  backbone: "efficientnet_b0"
+  num_classes: 2
+  pretrained: true
+  model_checkpoint: "models/weights/best_integrity_model.pth"
+  proxy_metrics:                    # Statistical proxies used before training data is available
+    - "sharpness"
+    - "edge_density"
+    - "color_histogram_uniformity"
+
+# --- Visual Integrity Training (Phase 5) ---
+visual_integrity_training:
+  dataset_dir: "data/synthetic"
+  real_subdir: "REAL"
+  attacked_subdir: "ATTACKED"
+  image_size: [224, 224]
+  batch_size: 16
+  num_workers: 0
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  epochs: 10
+  split_ratio:
+    train: 0.70
+    val: 0.15
+    test: 0.15
+  group_by: "document"              # Split at document/video level to prevent frame leakage
+  random_seed: 42
+  checkpoint_dir: "models/weights"
+  metrics_dir: "outputs/metrics"
+
+# --- Temporal Consistency ---
+temporal_consistency:
+  similarity_metric: "cosine"       # "cosine" only in initial version
+  consistency_threshold: 0.85       # Below this -> flag inconsistency
+
+# --- OCR ---
+ocr:
+  engine: "paddleocr"               # "paddleocr" | "easyocr"
+  languages: ["en"]
+  confidence_threshold: 0.6         # Minimum OCR character confidence
+  use_gpu: false                    # Run OCR on CPU to avoid CUDA conflicts
+
+# --- Field Parsing ---
+field_parsing:
+  document_format: "synthetic_v1"   # Controlled format for initial development
+  expected_fields:                  # Fields to attempt extraction
+    - "name"
+    - "date_of_birth"
+    - "document_number"
+    - "address"
+
+# --- Evidence Fusion ---
+fusion:
+  method: "weighted_average"        # "weighted_average"
+  weights:
+    visual_integrity: 0.40
+    temporal_consistency: 0.30
+    ocr_confidence: 0.15
+    text_consistency: 0.15
+    visual_weight: 0.40
+    temporal_weight: 0.30
+    ocr_weight: 0.15
+    text_consistency_weight: 0.15
+
+# --- Risk Classification ---
+risk_classification:
+  thresholds:
+    low_risk: 0.70                      # integrity_score >= 0.70 -> LOW RISK
+    medium_risk: 0.40                   # 0.40 <= integrity_score < 0.70 -> MEDIUM RISK
+    low: 0.70                           # backward compatibility alias
+    medium: 0.40                        # backward compatibility alias
+  disclaimer: "This system performs automated document integrity screening and does not provide official government authentication."
