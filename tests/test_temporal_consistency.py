@@ -21,9 +21,16 @@ from src.visual.temporal_consistency import TemporalConsistencyAnalyzer
 
 @pytest.fixture(scope="module")
 def feature_extractor():
-    """Shared feature extractor for test suite."""
+    """
+    Shared feature extractor for test suite.
+    Uses the synthetic baseline checkpoint to evaluate synthetic test fixtures,
+    decoupling the unit test from changes in the active production model weights.
+    """
+    ckpt = Path("models/weights/best_integrity_model_synthetic.pth")
+    if not ckpt.is_file():
+        ckpt = Path("models/weights/best_integrity_model.pth")
     return DocumentFeatureExtractor(
-        checkpoint_path="models/weights/best_integrity_model.pth",
+        checkpoint_path=str(ckpt) if ckpt.is_file() else None,
         device="cpu",
     )
 

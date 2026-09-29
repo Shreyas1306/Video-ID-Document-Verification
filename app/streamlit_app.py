@@ -1,20 +1,14 @@
 """
-Streamlit Demo Application
-==========================
-Interactive web UI for the document verification pipeline.
-
-Features (planned):
-    - Video upload widget
-    - Progress bar during processing
-    - Extracted frames gallery
-    - Detected document crops with bounding boxes
-    - OCR results and parsed fields
-    - Sub-score breakdown (visual, temporal, OCR, text)
-    - Fused risk score and classification badge
-    - Downloadable verification report (JSON)
+Streamlit Compatibility Launcher
+================================
+Canonical entrypoint: streamlit_app.py (at project root).
 
 Usage:
-    streamlit run app/streamlit_app.py
+    streamlit run streamlit_app.py
 """
 
-# TODO: Implement in Phase 4
+from pathlib import Path
+import runpy
+
+ROOT_APP = Path(__file__).resolve().parent.parent / "streamlit_app.py"
+runpy.run_path(str(ROOT_APP), run_name="__main__")

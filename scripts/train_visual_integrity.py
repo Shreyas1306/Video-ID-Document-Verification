@@ -13,6 +13,7 @@ Orchestrates:
 import argparse
 import logging
 from pathlib import Path
+import shutil
 import sys
 
 # Ensure project root is in sys.path
@@ -21,6 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from src.utils.config_loader import load_config
@@ -29,6 +31,8 @@ from src.visual.dataset import (
     collect_dataset_samples,
     create_leak_free_splits,
     get_document_transforms,
+    is_partitioned_dataset,
+    load_partitioned_dataset,
     validate_dataset_structure,
 )
 from src.visual.trainer import IntegrityTrainer
@@ -99,20 +103,23 @@ def main():
         return
 
     # Step 2: Collect Samples and Create Leak-Free Splits
-    print("\nStep 2: Preparing document-level leak-free splits...")
-    samples = collect_dataset_samples(
-        dataset_dir=dataset_dir,
-        real_subdir=real_subdir,
-        attacked_subdir=attacked_subdir,
-    )
-
-    train_samples, val_samples, test_samples = create_leak_free_splits(
-        samples=samples,
-        train_ratio=train_ratio,
-        val_ratio=val_ratio,
-        test_ratio=test_ratio,
-        random_seed=random_seed,
-    )
+    if is_partitioned_dataset(dataset_dir):
+        print(f"\nStep 2: Loading pre-partitioned dataset from '{dataset_dir}'...")
+        train_samples, val_samples, test_samples = load_partitioned_dataset(dataset_dir)
+    else:
+        print("\nStep 2: Preparing document-level leak-free splits from flat directory...")
+        samples = collect_dataset_samples(
+            dataset_dir=dataset_dir,
+            real_subdir=real_subdir,
+            attacked_subdir=attacked_subdir,
+        )
+        train_samples, val_samples, test_samples = create_leak_free_splits(
+            samples=samples,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+            random_seed=random_seed,
+        )
 
     print(f"  * Train set: {len(train_samples)} images")
     print(f"  * Val set:   {len(val_samples)} images")
@@ -136,7 +143,20 @@ def main():
         test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers
     )
 
-    # Step 4: Instantiate Model (EfficientNet-B0 baseline with binary classification head)
+    # Step 4: Archive existing checkpoints before overwriting
+    target_ckpt = Path(checkpoint_dir) / "best_integrity_model.pth"
+    synthetic_archive = Path(checkpoint_dir) / "best_integrity_model_synthetic.pth"
+    dlc_orig_archive = Path(checkpoint_dir) / "best_integrity_model_dlc_original_split.pth"
+    if target_ckpt.is_file() and not synthetic_archive.is_file():
+        shutil.copy2(target_ckpt, synthetic_archive)
+        logger.info(f"Archived existing synthetic checkpoint to: {synthetic_archive}")
+        print(f"\nArchived existing synthetic checkpoint to: {synthetic_archive}")
+    if target_ckpt.is_file() and not dlc_orig_archive.is_file():
+        shutil.copy2(target_ckpt, dlc_orig_archive)
+        logger.info(f"Archived existing DLC original split checkpoint to: {dlc_orig_archive}")
+        print(f"\nArchived existing DLC original split checkpoint to: {dlc_orig_archive}")
+
+    # Step 5: Instantiate Model (EfficientNet-B0 baseline with binary classification head)
     print("\nStep 3: Initializing EfficientNet-B0 transfer learning baseline...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using compute device: {device}")
@@ -148,10 +168,31 @@ def main():
         device=device,
     )
 
-    # Step 5: Train & Validate
+    # Step 6: Handle class imbalance using weighted CrossEntropyLoss on training set only
+    train_labels = [int(s["label"]) for s in train_samples]
+    num_real = sum(1 for l in train_labels if l == 0)
+    num_attacked = sum(1 for l in train_labels if l == 1)
+    total_train = len(train_labels)
+
+    if num_real > 0 and num_attacked > 0 and num_real != num_attacked:
+        w_real = total_train / (2.0 * num_real)
+        w_attacked = total_train / (2.0 * num_attacked)
+        print(f"\nApplying class-weighted CrossEntropyLoss on training set:")
+        print(f"  * REAL weight:     {w_real:.4f} ({total_train} / (2 * {num_real}))")
+        print(f"  * ATTACKED weight: {w_attacked:.4f} ({total_train} / (2 * {num_attacked}))")
+        class_weights = torch.tensor([w_real, w_attacked], dtype=torch.float, device=device)
+        train_criterion = nn.CrossEntropyLoss(weight=class_weights)
+    else:
+        train_criterion = nn.CrossEntropyLoss()
+
+    val_criterion = nn.CrossEntropyLoss()
+
+    # Step 7: Train & Validate
     print(f"\nStep 4: Training for {epochs} epochs...")
     trainer = IntegrityTrainer(
         model=classifier,
+        criterion=train_criterion,
+        val_criterion=val_criterion,
         lr=lr,
         weight_decay=weight_decay,
         checkpoint_dir=checkpoint_dir,
@@ -165,7 +206,7 @@ def main():
         epochs=epochs,
     )
 
-    # Step 6: Load Best Model and Evaluate on Test Set
+    # Step 8: Load Best Model and Evaluate on Test Set
     print("\nStep 5: Evaluating best checkpoint on unseen test set...")
     best_checkpoint = training_summary["best_checkpoint"]
     classifier.load_checkpoint(best_checkpoint)
@@ -173,17 +214,39 @@ def main():
     test_metrics = trainer.evaluate(test_loader)
 
     print("\n============================================================")
+    print(" TRAINING SUMMARY BY EPOCH")
+    print("============================================================")
+    history = training_summary.get("history", {})
+    train_losses = history.get("train_loss", [])
+    val_losses = history.get("val_loss", [])
+    train_accs = history.get("train_acc", [])
+    val_accs = history.get("val_acc", [])
+    val_f1s = history.get("val_f1", [])
+
+    for ep in range(len(train_losses)):
+        t_l = train_losses[ep] if ep < len(train_losses) else 0.0
+        v_l = val_losses[ep] if ep < len(val_losses) else 0.0
+        t_a = train_accs[ep] if ep < len(train_accs) else 0.0
+        v_a = val_accs[ep] if ep < len(val_accs) else 0.0
+        v_f = val_f1s[ep] if ep < len(val_f1s) else 0.0
+        print(f"Epoch {ep+1:02d}/{epochs:02d} | Train Loss: {t_l:.4f}, Train Acc: {t_a*100:.2f}% | Val Loss: {v_l:.4f}, Val Acc: {v_a*100:.2f}%, Val Macro F1: {v_f:.4f}")
+
+    print("\n============================================================")
     print(" TEST EVALUATION RESULTS")
     print("============================================================")
-    print(f"Total Test Samples:  {test_metrics.get('total_test_samples')}")
-    print(f"Accuracy:            {test_metrics.get('accuracy') * 100:.2f}%")
-    print(f"Macro Precision:     {test_metrics.get('macro_precision') * 100:.2f}%")
-    print(f"Macro Recall:        {test_metrics.get('macro_recall') * 100:.2f}%")
-    print(f"Macro F1-Score:      {test_metrics.get('macro_f1') * 100:.2f}%")
+    print(f"Total Test Samples:   {test_metrics.get('total_test_samples')}")
+    print(f"Accuracy:             {test_metrics.get('accuracy') * 100:.2f}%")
+    print(f"Macro Precision:      {test_metrics.get('macro_precision') * 100:.2f}%")
+    print(f"Macro Recall:         {test_metrics.get('macro_recall') * 100:.2f}%")
+    print(f"Macro F1-Score:       {test_metrics.get('macro_f1') * 100:.2f}%")
     if test_metrics.get("roc_auc") is not None:
-        print(f"ROC-AUC Score:       {test_metrics.get('roc_auc'):.4f}")
+        print(f"ROC-AUC Score:        {test_metrics.get('roc_auc'):.4f}")
     else:
-        print(f"ROC-AUC Score:       N/A (single class in test slice)")
+        print(f"ROC-AUC Score:        N/A (single class in test slice)")
+
+    print("\nPer-Class Metrics:")
+    print(f"  REAL     -> Precision: {test_metrics.get('precision_real', 0.0)*100:.2f}%, Recall: {test_metrics.get('recall_real', 0.0)*100:.2f}%, F1: {test_metrics.get('f1_real', 0.0)*100:.2f}%")
+    print(f"  ATTACKED -> Precision: {test_metrics.get('precision_attacked', 0.0)*100:.2f}%, Recall: {test_metrics.get('recall_attacked', 0.0)*100:.2f}%, F1: {test_metrics.get('f1_attacked', 0.0)*100:.2f}%")
 
     cm = test_metrics.get("confusion_matrix", {})
     print("\nConfusion Matrix:")
@@ -192,7 +255,7 @@ def main():
     print(f"  False Negative (ATTACKED missed as REAL):       {cm.get('false_negative_attacked_as_real')}")
     print(f"  True Positive  (ATTACKED correctly caught):     {cm.get('true_positive_attacked')}")
 
-    # Step 7: Save Metrics
+    # Step 9: Save Metrics
     metrics_file, cm_file = trainer.save_metrics(
         training_summary=training_summary,
         test_metrics=test_metrics,
@@ -201,6 +264,20 @@ def main():
     print(f"  - Model checkpoint: {best_checkpoint}")
     print(f"  - Metrics summary:  {metrics_file}")
     print(f"  - Confusion matrix: {cm_file}")
+
+    # Step 10: Verify that the final checkpoint can be loaded successfully
+    print("\nStep 6: Verifying final checkpoint loadability...")
+    verification_classifier = DocumentIntegrityClassifier(
+        backbone_name="efficientnet_b0",
+        num_classes=2,
+        checkpoint_path=best_checkpoint,
+        device=device,
+    )
+    verification_classifier.eval()
+    dummy_tensor = torch.zeros((1, 3, image_size[0], image_size[1]), device=device)
+    with torch.no_grad():
+        _ = verification_classifier(dummy_tensor)
+    print("Final checkpoint successfully verified and loaded by DocumentIntegrityClassifier.")
     print("============================================================\n")
 
 

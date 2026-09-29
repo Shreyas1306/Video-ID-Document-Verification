@@ -210,3 +210,48 @@ def test_prepare_visual_dataset_and_manifest(tmp_path):
             assert r["source_group"] == r["video_id"]
             assert (target_dir.parent.parent / r["path"]).is_file() or (target_dir / r["path"]).is_file() or Path(r["path"]).exists()
 
+
+def test_is_and_load_partitioned_dataset(tmp_path):
+    """Verify partitioned dataset detection, loading, and zero-leakage validation."""
+    from src.visual.dataset import is_partitioned_dataset, load_partitioned_dataset
+
+    part_dir = tmp_path / "part_dataset"
+    assert not is_partitioned_dataset(part_dir)
+
+    for split in ["train", "val", "test"]:
+        for cls in ["REAL", "ATTACKED"]:
+            (part_dir / split / cls).mkdir(parents=True)
+
+    assert is_partitioned_dataset(part_dir)
+
+    # Populate with disjoint documents
+    doc_splits = {
+        "train": ["doc_tr_01", "doc_tr_02"],
+        "val": ["doc_val_01"],
+        "test": ["doc_te_01"],
+    }
+    for split, docs in doc_splits.items():
+        for doc in docs:
+            for f in range(2):
+                img = Image.new("RGB", (64, 64), color=(100, 100, 100))
+                img.save(part_dir / split / "REAL" / f"{doc}.or_f{f:02d}.png")
+                img.save(part_dir / split / "ATTACKED" / f"{doc}.cc_f{f:02d}.png")
+
+    train_s, val_s, test_s = load_partitioned_dataset(part_dir)
+    assert len(train_s) == 8  # 2 docs * 2 classes * 2 frames
+    assert len(val_s) == 4    # 1 doc * 2 classes * 2 frames
+    assert len(test_s) == 4   # 1 doc * 2 classes * 2 frames
+
+    train_docs = {s["doc_id"] for s in train_s}
+    val_docs = {s["doc_id"] for s in val_s}
+    test_docs = {s["doc_id"] for s in test_s}
+    assert train_docs.isdisjoint(val_docs)
+    assert train_docs.isdisjoint(test_docs)
+    assert val_docs.isdisjoint(test_docs)
+
+    report = validate_dataset_structure(part_dir, min_samples_per_class=2)
+    assert report.is_valid
+    assert report.real_count == 8
+    assert report.attacked_count == 8
+    assert report.total_count == 16
+

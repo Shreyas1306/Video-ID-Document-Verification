@@ -110,9 +110,9 @@ python scripts/verify_environment.py
 python scripts/run_pipeline.py --video data/sample/sample_video.mp4
 ```
 
-### Streamlit Demo (Phase 4)
+### Streamlit Demo
 ```bash
-streamlit run app/streamlit_app.py
+streamlit run streamlit_app.py
 ```
 
 ### Run Tests

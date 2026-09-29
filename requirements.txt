@@ -12,12 +12,14 @@ PyYAML>=6.0
 torch>=2.0
 torchvision>=0.15
 
-# Object Detection
+# Object Detection / Segmentation
 ultralytics>=8.0
+segmentation-models-pytorch>=0.3
 
 # OCR
 paddlepaddle>=2.5              # PaddleOCR backend (CPU version; use paddlepaddle-gpu for CUDA)
 paddleocr>=2.7
+easyocr>=1.7                   # Resilient fallback OCR engine
 
 # ML Utilities
 scikit-learn>=1.3

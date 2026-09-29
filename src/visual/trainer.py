@@ -39,6 +39,7 @@ class IntegrityTrainer:
         self,
         model: DocumentIntegrityClassifier,
         criterion: Optional[nn.Module] = None,
+        val_criterion: Optional[nn.Module] = None,
         optimizer: Optional[torch.optim.Optimizer] = None,
         lr: float = 0.0003,
         weight_decay: float = 0.0001,
@@ -49,6 +50,7 @@ class IntegrityTrainer:
         self.model = model
         self.device = model.device if device is None else torch.device(device)
         self.criterion = criterion or nn.CrossEntropyLoss()
+        self.val_criterion = val_criterion or nn.CrossEntropyLoss()
         self.optimizer = optimizer or torch.optim.AdamW(
             self.model.parameters(), lr=lr, weight_decay=weight_decay
         )
@@ -108,7 +110,7 @@ class IntegrityTrainer:
                 labels = batch["label"].to(self.device)
 
                 outputs = self.model(images)
-                loss = self.criterion(outputs, labels)
+                loss = self.val_criterion(outputs, labels)
 
                 total_loss += loss.item() * images.size(0)
                 preds = torch.argmax(outputs, dim=1)
@@ -222,6 +224,10 @@ class IntegrityTrainer:
         binary_rec = float(recall_score(y_true, y_pred, pos_label=1, zero_division=0))
         binary_f1 = float(f1_score(y_true, y_pred, pos_label=1, zero_division=0))
 
+        real_prec = float(precision_score(y_true, y_pred, pos_label=0, zero_division=0))
+        real_rec = float(recall_score(y_true, y_pred, pos_label=0, zero_division=0))
+        real_f1 = float(f1_score(y_true, y_pred, pos_label=0, zero_division=0))
+
         # ROC-AUC (requires both classes present in y_true)
         roc_auc: Optional[float] = None
         if len(np.unique(y_true)) > 1:
@@ -243,6 +249,9 @@ class IntegrityTrainer:
             "precision_attacked": round(binary_prec, 4),
             "recall_attacked": round(binary_rec, 4),
             "f1_attacked": round(binary_f1, 4),
+            "precision_real": round(real_prec, 4),
+            "recall_real": round(real_rec, 4),
+            "f1_real": round(real_f1, 4),
             "roc_auc": round(roc_auc, 4) if roc_auc is not None else None,
             "confusion_matrix": {
                 "raw": cm.tolist(),

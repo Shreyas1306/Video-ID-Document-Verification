@@ -79,26 +79,138 @@ def extract_doc_id(file_path: Union[str, Path]) -> str:
     stem = path.stem
 
     # 1. If inside a nested folder structure like REAL/doc_001/frame_01.png
-    if path.parent.name not in {"REAL", "ATTACKED", ".", ""}:
+    if path.parent.name not in {"REAL", "ATTACKED", "real", "attacked", ".", ""}:
         return path.parent.name
 
-    # 2. Regex matching common patterns: doc_xxx, video_xxx, subject_xxx
+    # 2. If dot in stem (DLC-2021 clip convention: <doc_id>.<clip_code>_<frame>)
+    if "." in stem:
+        return stem.split(".")[0]
+
+    # 3. Regex matching common patterns: doc_xxx, video_xxx, subject_xxx
     match = re.match(r"^([a-zA-Z]+[-_]\d+)", stem)
     if match:
         return match.group(1)
 
-    # 3. Fallback: split by _frame, _f, _t
+    # 4. Fallback: split by _frame, _f, _t
     frame_split = re.split(r"[_-](?:frame|f|t|\d+$)", stem, flags=re.IGNORECASE)
     if len(frame_split) > 1 and frame_split[0]:
         return frame_split[0]
 
-    # 4. Fallback: split on last underscore if present
+    # 5. Fallback: split on last underscore if present
     if "_" in stem:
         parts = stem.rsplit("_", 1)
         if parts[0]:
             return parts[0]
 
     return stem
+
+
+def is_partitioned_dataset(dataset_dir: Union[str, Path]) -> bool:
+    """Check if the dataset directory contains pre-partitioned train/val/test splits."""
+    base_path = Path(dataset_dir)
+    if not base_path.is_dir():
+        return False
+    if (base_path / "manifest.csv").is_file():
+        return True
+    return (
+        (base_path / "train").is_dir()
+        and (base_path / "val").is_dir()
+        and (base_path / "test").is_dir()
+    )
+
+
+def load_partitioned_dataset(
+    dataset_dir: Union[str, Path],
+) -> Tuple[List[Dict[str, Union[str, int]]], List[Dict[str, Union[str, int]]], List[Dict[str, Union[str, int]]]]:
+    """
+    Load pre-partitioned train, val, and test sample lists.
+
+    Reads manifest.csv if present, otherwise scans train/, val/, and test/ subdirectories.
+    Guarantees zero document identity overlap across splits.
+    """
+    import csv
+
+    base_path = Path(dataset_dir).resolve()
+    manifest_file = base_path / "manifest.csv"
+
+    train_samples: List[Dict[str, Union[str, int]]] = []
+    val_samples: List[Dict[str, Union[str, int]]] = []
+    test_samples: List[Dict[str, Union[str, int]]] = []
+
+    if manifest_file.is_file():
+        with open(manifest_file, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                split = str(row.get("split", "")).lower().strip()
+                label_str = str(row.get("label", "")).upper().strip()
+                if label_str not in CLASS_TO_LABEL:
+                    continue
+
+                crop_rel = row.get("crop_path") or row.get("path") or ""
+                img_path = (base_path / crop_rel).resolve()
+                doc_id = (
+                    row.get("document_id")
+                    or row.get("source_group")
+                    or extract_doc_id(img_path)
+                )
+
+                item = {
+                    "path": str(img_path),
+                    "label": CLASS_TO_LABEL[label_str],
+                    "class_name": label_str,
+                    "doc_id": doc_id,
+                }
+
+                if split == "train":
+                    train_samples.append(item)
+                elif split == "val":
+                    val_samples.append(item)
+                elif split == "test":
+                    test_samples.append(item)
+    else:
+        # Fallback to subdirectory scanning
+        split_map = {
+            "train": train_samples,
+            "val": val_samples,
+            "test": test_samples,
+        }
+        for split_name, sample_list in split_map.items():
+            split_dir = base_path / split_name
+            if not split_dir.is_dir():
+                continue
+            for class_name, label in CLASS_TO_LABEL.items():
+                candidates = [split_dir / class_name, split_dir / class_name.lower()]
+                seen_dirs = set()
+                for class_dir in candidates:
+                    if class_dir.is_dir():
+                        resolved_dir = class_dir.resolve()
+                        if resolved_dir not in seen_dirs:
+                            seen_dirs.add(resolved_dir)
+                            for img_file in sorted(class_dir.rglob("*")):
+                                if img_file.is_file() and img_file.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS:
+                                    sample_list.append({
+                                        "path": str(img_file.resolve()),
+                                        "label": label,
+                                        "class_name": class_name,
+                                        "doc_id": extract_doc_id(img_file),
+                                    })
+
+    # Verification: Ensure zero document ID leakage
+    train_ids = {s["doc_id"] for s in train_samples}
+    val_ids = {s["doc_id"] for s in val_samples}
+    test_ids = {s["doc_id"] for s in test_samples}
+
+    assert len(train_ids.intersection(val_ids)) == 0, f"Leakage between train and val: {train_ids & val_ids}"
+    assert len(train_ids.intersection(test_ids)) == 0, f"Leakage between train and test: {train_ids & test_ids}"
+    assert len(val_ids.intersection(test_ids)) == 0, f"Leakage between val and test: {val_ids & test_ids}"
+
+    logger.info(
+        f"Partitioned dataset loaded: Train={len(train_samples)} frames ({len(train_ids)} docs), "
+        f"Val={len(val_samples)} frames ({len(val_ids)} docs), "
+        f"Test={len(test_samples)} frames ({len(test_ids)} docs)"
+    )
+
+    return train_samples, val_samples, test_samples
 
 
 def validate_dataset_structure(
@@ -112,11 +224,9 @@ def validate_dataset_structure(
 
     Checks:
       1. Dataset directory exists.
-      2. REAL and ATTACKED subdirectories exist.
-      3. Image files exist in both subdirectories.
-      4. Samples meet minimum count threshold.
-      5. Basic readability of image files.
-      6. Document group counts.
+      2. If partitioned (train/val/test or manifest.csv): validates splits and zero leakage.
+      3. Otherwise: REAL and ATTACKED subdirectories exist and meet count thresholds.
+      4. Document group counts.
     """
     base_path = Path(dataset_dir)
     issues: List[str] = []
@@ -134,6 +244,60 @@ def validate_dataset_structure(
             issues=[f"Dataset directory '{base_path}' does not exist."],
             summary="Dataset directory not found.",
         )
+
+    # Check for partitioned dataset
+    if is_partitioned_dataset(base_path):
+        try:
+            train_s, val_s, test_s = load_partitioned_dataset(base_path)
+            all_s = train_s + val_s + test_s
+            real_count = sum(1 for s in all_s if s["label"] == CLASS_TO_LABEL["REAL"])
+            attacked_count = sum(1 for s in all_s if s["label"] == CLASS_TO_LABEL["ATTACKED"])
+            unique_groups = len({s["doc_id"] for s in all_s})
+
+            if len(train_s) == 0:
+                issues.append("Partitioned dataset has 0 training samples.")
+            if len(val_s) == 0:
+                issues.append("Partitioned dataset has 0 validation samples.")
+            if len(test_s) == 0:
+                issues.append("Partitioned dataset has 0 test samples.")
+            if real_count < min_samples_per_class:
+                issues.append(
+                    f"Insufficient REAL samples: found {real_count}, minimum required is {min_samples_per_class}."
+                )
+            if attacked_count < min_samples_per_class:
+                issues.append(
+                    f"Insufficient ATTACKED samples: found {attacked_count}, minimum required is {min_samples_per_class}."
+                )
+
+            return DatasetValidationReport(
+                is_valid=len(issues) == 0,
+                dataset_dir=str(base_path),
+                real_dir_exists=True,
+                attacked_dir_exists=True,
+                real_count=real_count,
+                attacked_count=attacked_count,
+                total_count=len(all_s),
+                unique_groups=unique_groups,
+                issues=issues,
+                summary=(
+                    f"Partitioned dataset contains {real_count} REAL and {attacked_count} ATTACKED images "
+                    f"across {unique_groups} document groups (Train: {len(train_s)}, Val: {len(val_s)}, Test: {len(test_s)})."
+                ),
+            )
+        except Exception as e:
+            issues.append(f"Failed to load partitioned dataset: {e}")
+            return DatasetValidationReport(
+                is_valid=False,
+                dataset_dir=str(base_path),
+                real_dir_exists=False,
+                attacked_dir_exists=False,
+                real_count=0,
+                attacked_count=0,
+                total_count=0,
+                unique_groups=0,
+                issues=issues,
+                summary=f"Error validating partitioned dataset: {e}",
+            )
 
     real_path = base_path / real_subdir
     attacked_path = base_path / attacked_subdir
